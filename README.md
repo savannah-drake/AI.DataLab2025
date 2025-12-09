@@ -78,5 +78,3 @@ Open the .Rmd file and click Knit to regenerate the report.
 
 License / usage
 Data and shapefiles are from external sources (City of Atlanta / MARTA / lab materials); please respect their terms of use.
-
-Analysis code in this repository may be reused with attribution.
