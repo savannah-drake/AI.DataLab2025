@@ -1,0 +1,359 @@
+---
+title: "FIFA World Cup 2026™: Geospatial Analysis of Business Disinvestment and MARTA Access Disparities Near Merecedes-Benz Stadium in Atlanta NSAs"
+author: "Savannnah Drake"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#packages
+library(rmarkdown)
+library(sf) # spatial data
+library(dplyr) # data manipulation
+library(ggplot2) # graphing
+library(viridis) #colorblind-friendly mapping
+library(knitr) #dynamic report generation
+
+#spatial behavior & shapefile helper
+sf::sf_use_s2(FALSE)
+Sys.setenv(SHAPE_RESTORE_SHX = "YES")
+```
+
+Brief Introduction:
+Disinvestment and unequal access to transportation infrastructure shape economic opportunities across Atlanta. In this project, I use spatial analysis to examine:
+
+- Where disinvested businesses are concentrated
+
+- How these patterns align with Neighborhood Statistical Areas (NSAs)
+
+- How closely MARTA transit access aligns with areas of high need
+
+- How distance to major landmarks, specifically Mercedes-Benz Stadium, relate to disinvestment patterns
+
+This report was developed for the AI.Data Lab and demonstrates my skills in spatial data processing, geospatial joins, visualization, and exploratory data analytics.
+
+```{r data loading, message=FALSE, warning=FALSE, include=FALSE}
+#import data
+atl_map<-st_read("/Users/savannahimani/QTM150/AI.DataLab/AI.DataLab/atl_mobility_nsa.shp") #load base shapefile/map
+bus_license_data<-read.csv("atl_bus_license_data.csv") #loads business data
+marta_stop_sf<-st_read("MARTA_Stops.shp")
+if (is.na(st_crs(marta_stop_sf))) {
+st_crs(marta_stop_sf) <- 4326
+}
+```
+
+
+```{r data preparation, message=FALSE, warning=FALSE, include=FALSE}
+# Convert business CSV to sf points(long,lat)
+business_plots<-st_as_sf(
+  bus_license_data,
+  coords = c("longitude", "latitude"),
+  crs = 4326, #WGS84: standard GPS coordinates
+  remove = FALSE #keep longitude/latitude columns too
+)
+
+# Transform business points to shapefile CRS
+business_points <- st_transform(business_plots, st_crs(atl_map))
+
+#Keep points that are within range of atl_map geometry
+business_points<-business_points |>
+  st_join(atl_map, join = st_within, left = FALSE)
+
+# Create one polygon per NSA
+nsa_grouped<-atl_map |>
+  group_by(NSA)|>
+  summarise(geometry = st_union(geometry), .groups = "drop")
+
+#Join businesses to NSA polygons (ensure each business is contained within respective NSA)
+biz_nsa <-st_join(business_points,nsa_grouped, join = st_within,left = FALSE)
+# If the join created duplicate NSA columns, standardize
+if("NSA.x" %in% names(biz_nsa)){
+biz_nsa<-biz_nsa %>%
+  rename(NSA = NSA.x)
+}
+# Counts of disinvested businesses per NSA
+nsa_counts <-biz_nsa |>
+  st_drop_geometry()|>
+  group_by(NSA) |>
+  summarise(
+    disinvested_count = sum(disinvested_neighborhood == TRUE, na.rm = TRUE),
+    total_businesses = n(),
+    disinvested_share = disinvested_count/total_businesses
+  )
+
+# Join counts back onto NSA polygons for mapping
+nsa_map<-nsa_grouped |>
+  left_join(nsa_counts, by = "NSA")
+
+# Prepare MARTA data: transform CRS and keep stops within atl_map bounds
+st_crs(marta_stop_sf)<-4326
+marta_stop_sf <- st_transform(marta_stop_sf, st_crs(atl_map))
+atl_union<-st_union(atl_map)
+inside_idx<-lengths(st_intersects(marta_stop_sf,atl_union)) > 0
+marta_in<-marta_stop_sf[inside_idx, ]
+
+# Count MARTA stops per NSA
+marta_in_nsa <- st_intersection(marta_stop_sf, nsa_map)
+nsa_marta_counts <- marta_in_nsa %>%
+  st_drop_geometry() %>%
+  group_by(NSA) %>%
+  summarise(marta_stops = n(), .groups = "drop")
+
+
+# Full NSA Table (disinvestment + MARTA stops)
+nsa_complete <- nsa_counts %>%
+  left_join(nsa_marta_counts, by = "NSA") %>%
+  mutate(marta_stops = ifelse(is.na(marta_stops), 0, marta_stops))
+
+# Identify NSAs with 50 or more disinvested businesses
+high_disinvest <- nsa_complete %>%
+  filter(disinvested_count >= 50)
+
+# Prepare distance to Mercedes-Benz Stadium
+nsa4326 <- st_transform(nsa_map, 4326)
+mb_stadium <- st_sfc(
+  st_point(c(-84.401, 33.755)),  # Mercedes‑Benz Stadium 
+  crs = 4326
+)
+nsa_centroids <- nsa4326 %>%
+  st_centroid() %>%
+  select(NSA)
+nsa_with_dist <- nsa_centroids %>%
+  mutate(dist_km = as.numeric(st_distance(geometry, mb_stadium)) / 1000) %>%
+  st_drop_geometry()
+
+# Join distance info onto high disinvestment NSA table priority analysis
+high_priority <- high_disinvest %>%
+  left_join(nsa_with_dist, by = "NSA")
+```
+Methods:
+
+Data Sources
+
+- Atlanta Neighborhood Statistical Areas (shapefile)
+
+- Business license data (CSV) with latitude/longitude and disinvestment flags
+
+- MARTA stop shapefile
+
+- Mercedes-Benz Stadium coordinates
+
+Analytical Workflow
+
+- Load and clean spatial datasets
+
+- Convert business license coordinates into spatial points
+
+- Join businesses to NSAs via geometric intersection
+
+- Summarize disinvestment counts per NSA
+
+- Identify NSAs with high levels of disinvestment
+
+- Analyze MARTA access within NSAs
+
+- Measure distance from NSA centroids to the stadium
+
+- Visualize spatial disparities across Atlanta
+
+Map 1: Distribution of Disinvested Businesses(points)
+
+```{r disinvested businesses distribution, echo=FALSE}
+ggplot() +
+  geom_sf(data = atl_map, fill = "white", color = "black", size = 0.5) +
+  geom_sf(data = business_points, aes(color = disinvested_neighborhood),size = 1 , alpha = 0.8) +
+  scale_color_manual(values = c ("TRUE" = "red", "FALSE"= "darkgreen"))+
+  theme_minimal()
+```
+
+Figure note: Points show individual business locations and whether they are flagged as "disinvested" in the license data.
+
+Map 2: NSA Chloropleth: Disinvested Business Counts
+```{r NSA chloropleth, echo=FALSE}
+ggplot() +
+  geom_sf(data = nsa_map,
+          aes(fill = disinvested_count),
+          color = "white", size = 0.3) +
+  scale_fill_viridis_c(option = "C", na.value = "grey90") +
+  theme_minimal() +
+  labs(
+    fill  = "Disinvested\nbusinesses",
+    color = "Disinvested?",
+    title = "Disinvested Businesses by Neighborhood Statistical Area",
+    subtitle = "NSAs shaded by count of disinvested businesses"
+  )
+```
+
+Map 3: Disinvested Businesses, MARTA Stops, and Stadium
+```{r MARTA stops, echo=FALSE}
+#maps Mercedes Benz Location for relativity to stadium
+stadium_df<-data.frame(
+  name = "Mercedes-Benz Stadium",
+  longitude = -84.4010,
+  latitude = 33.7555
+)
+stadium_sf <- st_as_sf(
+  stadium_df,
+  coords = c("longitude", "latitude"),
+  crs = 4326
+)
+
+ggplot() +
+  # basemap
+  geom_sf(data = atl_map,
+          fill = "grey90", color = "white",
+          show.legend = FALSE) +
+
+  # disinvested businesses
+  geom_sf(data = business_points |>
+            dplyr::filter(disinvested_neighborhood),
+          aes(color = "Disinvested businesses",
+              shape = "Disinvested businesses"),
+          size = 1.2,
+          show.legend = TRUE) +
+
+  # MARTA stops
+  geom_sf(data = marta_in,
+          aes(color = "MARTA stops",
+              shape = "MARTA stops"),
+          size = 0.6,
+          alpha = 0.4,
+          show.legend = TRUE) +
+
+  # stadium
+  geom_sf(data = stadium_sf,
+          aes(color = "Mercedes-Benz Stadium",
+              shape = "Mercedes-Benz Stadium"),
+          size = 4,
+          show.legend = TRUE) +
+  scale_color_manual(
+    name = NULL,
+    values = c(
+      "Disinvested businesses"    = "skyblue",
+      "MARTA stops"               = "red",
+      "Mercedes-Benz Stadium"     = "green"
+    )
+  ) +
+  scale_shape_manual(
+    name = NULL,
+    values = c(
+      "Disinvested businesses"    = 17,
+      "MARTA stops"               = 21,
+      "Mercedes-Benz Stadium"     = 15
+    )
+  ) +
+  guides(color = guide_legend(override.aes = list(alpha = 1))) +
+  labs(
+    title = "Where Are Disinvested Businesses Relative to MARTA Stops?",
+    subtitle = "Disinvested businesses, MARTA stops, and Mercedes-Benz Stadium in Atlanta",
+    x = NULL, y = NULL
+  ) +
+  coord_sf(datum = NA) +
+  theme_minimal() +
+  theme(
+    legend.position = "right"
+  )
+```
+
+Table 1: Top NSAs by Disinvested Businesses, MARTA Access, Distance to Stadium
+```{r table, echo=FALSE}
+#complete NSA table with disinvestment + MARTA stops
+priority_flags <- high_priority %>%
+  mutate(
+    high_disinvest = disinvested_count >= 50,
+    low_marta      = marta_stops < 40,        # adjust if needed
+    close_stadium  = dist_km <= 5,            # adjust if needed
+    priority_flag  = high_disinvest & low_marta & close_stadium
+  )
+
+priority_nsa <- priority_flags %>%
+  filter(priority_flag) %>%                   # keep only NSAs meeting all three
+  arrange(dist_km, marta_stops) %>%           # closest, lowest access at top
+  select(
+    NSA,
+    `Disinvested Businesses(>=50)` = disinvested_count,
+    `MARTA stops` = marta_stops,
+    `Distance to stadium(km)` = dist_km
+  )
+knitr::kable(priority_nsa)
+```
+
+
+Plot 4: High-Disinvestment NSAs : MARTA stop counts(ranked)
+```{r plot4, echo=FALSE}
+ggplot(high_disinvest,
+       aes(x = reorder(NSA, marta_stops),
+           y = marta_stops)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    x = "NSA (disinvested_count ≥ 50)",
+    y = "Number of MARTA stops",
+    title = "NSAs with High Disinvestment by MARTA Availability"
+  ) +
+  theme_minimal()
+```
+
+
+Plot 5: Priority Plot: Disinvestment, MARTA, & Stadium Proximity
+```{r plot5, echo=FALSE, warning=FALSE}
+#put NSA polygons into 4326 lon/lat for the stadium
+nsa4326 <- st_transform(nsa_map, 4326)
+
+#create Mercedes‑Benz Stadium point (lon/lat) and match CRS to NSAs
+mb_stadium <- st_sfc(
+  st_point(c(-84.401, 33.755)),  # Mercedes‑Benz Stadium coords
+  crs = 4326
+)
+
+#get NSA centroids to measure distance to the stadium
+nsa_centroids <- nsa4326 %>%
+  st_centroid() %>%
+  select(NSA)
+
+#calculate distance from each NSA centroid to the stadium (km)
+nsa_with_dist <- nsa_centroids %>%
+  mutate(dist_km = as.numeric(st_distance(geometry, mb_stadium)) / 1000) %>%
+  st_drop_geometry()
+#priority index scatter: how disinvested, how much MARTA, how close to the stadium
+ggplot(high_priority,
+       aes(x = disinvested_count,
+           y = marta_stops,
+           label = NSA,
+           color = dist_km)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_text(vjust = -1, size = 3, check_overlap = TRUE) +
+  scale_color_viridis_c(name = "Distance to\nStadium (km)", direction = -1) +
+  labs(
+    title = "High Disinvestment NSAs: MARTA Access and Distance to Mercedes‑Benz Stadium",
+    x = "Disinvested businesses (NSA ≥ 50)",
+    y = "MARTA stops in NSA"
+  ) 
+```
+
+Discussion:
+ 
+This analysis reveals several major findings:
+
+- Disinvestment is heavily concentrated in select NSAs, many of which show limited MARTA accessibility.
+
+- Several high-disinvestment NSAs are close to economic hubs, suggesting potential for targeted investment.
+
+- NSAs far from the stadium are disproportionately disinvested and underserved by MARTA.
+
+- Visual analysis supports the idea that transit inequality mirrors economic inequality.
+
+This framework can support equitable policy decisions around infrastructure, business support, and mobility planning.
+
+Conclusion:
+
+This project combines spatial data processing, geospatial statistical joins, and layered visualization to reveal structural inequities across Atlanta.
+The workflow demonstrates technical skills in:
+
+- R, R Markdown
+
+- GIS and spatial joins
+
+- Exploratory spatial analysis
+
+- Data storytelling and visualization
